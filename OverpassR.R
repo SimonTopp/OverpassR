@@ -17,228 +17,284 @@ wrs <- wrs[wrs$MODE == 'D',]
 
 #Lookup table and array of dates
 lookup_table <- read.delim('data/in/lookup_table.txt')
-global <- reactiveValues(min_date = Sys.Date(), max_date = Sys.Date() + 16)
 
 #Global variable output table. It will update with each map click and reset only when 'reset map' button is clicked
-global_table = data.frame("tile_ID" = numeric(), "overlapping_rows" = numeric(), "overlapping_paths" = numeric(), "next_pass" = character()) %>% t() %>% as.data.frame()
+global_table = data.frame()
 
 
 ui <- fluidPage(
   
-  titlePanel("World Reference System Satellite Tiles"),
-  mainPanel("Click on a tile to see its next WRS overpass date"),
-  leafletOutput('map'),
-  actionButton("refreshButton", "Refresh Map"),
+  fixedRow(
+    column(4, offset = 5,
+           titlePanel("OverpassR")),
+  ),
+  
+  fixedRow(
+    column(10, offset = 3, 
+           mainPanel("Click on map or enter coordinates to view satellite overpass information")
+    )
+  ),
+  
+  leafletOutput('map', width = 1000, height = 500),
   
   fluidRow(
-    column(12,
-           DTOutput('table' )#,
+    column(1, offset = 0, actionButton("refreshButton", "Reset")),
+    uiOutput("ui")
+  ),
+  
+  #Row with coordinate input, date input, search
+  fixedRow(
+    
+    column(2, offset = 1,
+           textInput("lat", label = NULL , value = "", placeholder = "Lat", width = 130)
+    ),
+    column(2,
+           textInput("lon", label = NULL , value = "", placeholder = "Lon", width = 130)
     ),
     
-    column(12, offset = 8,
+    column(1, offset = 0, 
+           actionButton("find", label = "Find")
+    ),
+    
+    column(3, offset = 2,
            dateRangeInput("dates", "Date range:",
                           start = Sys.Date(),
-                          end = Sys.Date()+16)#,
-    ),
-    
-    column(12, offset = 8, 
-           actionButton('applyDates', "Apply Date Filter")#,
-    )#,
-  )  
+                          end = Sys.Date()+16)
+    )
+  ),
+  
+  #Apply Date Button
+  fixedRow( 
+    column(1, offset = 8,
+           actionButton('applyDates', "Apply Date Filter")
+    )
+  ),
+  
+  fluidRow(
+    DTOutput('table')
+  ),
+  
+  fixedRow(
+    mainPanel(" ")
+  ),
+  
+  fixedRow(
+    column(1, offset = 8, 
+           downloadButton('download', "Download") )
+  )
 )
 
 
 
-server <- function(input, output){
+server <- function(input, output, session){
+  
+  proxy_table = dataTableProxy('table')
+  proxyMap <- leafletProxy("map")
+  
   
   #Render map with base layers WorldImagery and Labels
   output$map <- renderLeaflet({
     
-    leaflet() %>% addProviderTiles(providers$Esri.WorldImagery) %>% 
-      addProviderTiles(providers$CartoDB.VoyagerOnlyLabels) %>% setView(lat=10, lng=0, zoom=2)  
+    leaflet() %>%
+      addTiles(group = "Default") %>%
+      addProviderTiles(providers$Esri.WorldImagery, group = "Satellite") %>%
+      addProviderTiles(providers$CartoDB.VoyagerOnlyLabels, group = "Satellite") %>%
+      setView(lat=10, lng=0, zoom=2)  %>%
+      addLayersControl(
+        baseGroups = c("Default", "Satellite"),
+        options = layersControlOptions(collapsed = FALSE)
+      )
   })
   
   
-  proxy_table = dataTableProxy('table')
+  observeEvent(input$find,{
+    
+    lon <- input$lon %>% as.numeric()
+    lat <- input$lat %>% as.numeric()
+    validate(
+      need((validCoords(lon, lat)), "Enter valid coordinates")
+    )
+    
+    generate(lon, lat)
+  })
   
   
   observeEvent(input$map_click,{
     
-    click <- input$map_click
-    lat <- click$lat
-    lon <- click$lng
-    
-    if(is.null(click)) 
+    if(is.null(input$map_click))
       return() 
     
-    #Pull the latitude, longitude, and path row (pr) from click event
-    else {
-      
-      #Save the coordinates as a data frame, and convert it to a spatial point
-      coords <- as.data.frame(cbind(lon, lat)) 
-      point <- SpatialPoints(coords)
-      proj4string(point) <- CRS("+proj=longlat +ellps=WGS84 +datum=WGS84 +no_defs")
-      
-      #Convert the point to a shape file so they can intersect
-      pnt <-  st_as_sf(point, coords = c('lon' , 'lat'))
-      
-      
-      #Create a boolean matrix of all the polygons that intersect pnt (a user's mapclick)
-      ## And select those polygons from WRS
-      boolean_matrix <- st_intersects(wrs, pnt, sparse = FALSE)
-      overlapping_tiles <- (wrs[boolean_matrix,])
-      overlapping_paths <-  overlapping_tiles$PATH
-      overlapping_rows <- overlapping_tiles$ROW
-      tile_ID <- overlapping_tiles$PR
-      
-      
-      #Rows of the lookup table from the intersected tile; pull the "Overpass" 
-      ##column (earlier known date of satellite overpass)
-      known_pass <- lookup_table[overlapping_paths,]$Overpass
-      
-      
-      
-      if(input$applyDates){
-        
-        start_date <- input$dates[1]
-        end_date <- input$dates[2]
-        days_til <- (as.numeric(start_date - known_pass)) %% 16
-        next_pass <- (start_date + days_til) %>% as.Date()
-        
-        len <- 1:length(next_pass)
-        updating_table <- NULL
-        
-        for (r in len){
-          x <- seq.Date(next_pass[r], to = end_date, by = 16) %>% as.data.frame.character()
-          updating_table <- cbind.pad(updating_table, x)
-        }
-        
-        updating_table <- updating_table %>% t() %>% t()
-        appending_table <- rbind("tile_ID" = tile_ID, "overlapping rows" = overlapping_rows, "overlapping paths" = overlapping_paths, "next pass" = updating_table) %>% as.data.frame()
-        appending_table <- `colnames<-`(appending_table, 'Tile')
-        #If global table isn't empty, update it with the new click and unique values
-        
-        if(!ncol(global_table) == 0){
-          global_table <<- cbind.pad(appending_table, global_table) %>% as.data.frame()
-        }
-        
-        else
-          global_table <<- appending_table     
-        
-      }
-      
-      
-      else{
-        
-        days_til <- (as.numeric(Sys.Date()) - known_pass) %% 16
-        next_pass <- (Sys.Date() + days_til) %>% as.character.Date()
-        
-        #Table with all of the data from the map click
-        appending_table <- rbind("tile_ID" = tile_ID, "overlapping_rows" = overlapping_rows, "overlapping_paths" = overlapping_paths, "next_pass" = next_pass) %>% as.data.frame()
-        appending_table <- `colnames<-`(appending_table, "Tile")
-        
-        #If global table isn't populated yet, update it with appending-table. Otherwise, append the new values to the global table
-        if(!ncol(global_table) == 0)
-          global_table <<- cbind.pad(appending_table, global_table)
-        
-        
-        else
-          global_table <<- appending_table
-        
-      }
-      
-      #Generate and display output table
-      output$table <<- renderDT(global_table)
-      
-      
-      #Update the map: clear all tiles, then add only the ones that overlap in Red
-      leafletProxy("map")%>%
-        addProviderTiles(providers$Esri.WorldImagery) %>% 
-        addProviderTiles(providers$CartoDB.VoyagerOnlyLabels) %>% 
-        setView(lng = lon , lat = lat, zoom = 6) %>%
-        addPolygons(data = overlapping_tiles, color = 'red')
-      
-    }  
+    #clean up
+    click <- input$map_click
+    lon <- click$lng
+    lat <- click$lat
+    
+    generate(lon, lat)
     
   })
   
   
-  #Use a separate observer to refresh the map as needed
-  observe( {
+  #Use a separate observer to clear shapes and output table if "clear tiles" button clicked
+  observeEvent(input$refreshButton,{
     
-    proxyMap <- leafletProxy("map")
+    if(is.null(input$refreshButton))
+      return()
     
-    if(input$refreshButton){
-      proxyMap%>%
-        clearShapes()%>%
-        addProviderTiles(providers$Esri.WorldImagery) %>%
-        addProviderTiles(providers$CartoDB.VoyagerOnlyLabels) %>% 
-        setView(lat=10, lng=0, zoom=2)
+    proxyMap%>% clearShapes()
+    
+    updateDateRangeInput(session, "dates", "Date range:",
+                         start = Sys.Date(), end = Sys.Date()+16)
+    
+    output$table <- renderDT(NULL)
+    global_table <<- NULL
+    
+  }
+  )
+  
+  #Updates map with tiles and global table with data given coordinates of a click
+  generate <- function(lon, lat){
+    
+    df <- returnPR(lon, lat, wrs)
+    paths <- df$path
+    rows <- df$row
+    tile_shapes <- df$shape.geometry
+
+    #Shape file of tiles that intersect
+    reference_date <- lookup_table[paths,]$Overpass
+    
+    #Handles if date filter is applied  
+    if(input$applyDates){
       
-      output$table <- renderDT(NULL)
-      global_table <<- NULL
+      
+      validate(
+        need( (as.numeric(input$dates[2] - input$dates[1]) >=16), message =  "Please enter valid date range") 
+      )
+      
+      start_date <- input$dates[1]
+      end_date <- input$dates[2]
+      
+      days_til <- (as.numeric(start_date - reference_date)) %% 16
+      next_pass <- (start_date + days_til) %>% as.Date()
+      
+      len <- 1:length(next_pass)
+      updating_table <- NULL
+      
+      #Each loop iteration creates a data frame "temp" of dates, path, row, lat, lon for one tile
+      ## Subseqeuent iterations create a temp data frame, then append the new data frame to the previous one
+      for (r in len){
+        dates <- seq.Date(next_pass[r], to = end_date, by = 16) %>% as.character()
+        temp <- cbind("Date" = dates, "Path" = paths, "Row" = rows, "Lat" = lat, "Long" = lon)
+        updating_table <- rbind(updating_table, temp)
+      }
+      
       
     }
     
-  })
-  
-}
-
-
-
-
-
-#Helper Functions
-
-
-#Given two data frames of different length, return a third array of x amd mx merged by columns
-#with NULL filling the empty space 
-cbind.pad <- function(x, mx){
-  
-  
-  #Base cases: passing one or two null values, equal dimensions
-  if(is.null(x) && is.null(mx))
-    return(data.frame())
-  
-  else if(is.null(x))
-    return(mx)
-  
-  else if(is.null(mx))
-    return(x)
-  
-  len <- max(nrow(x), nrow(mx))
-  
-  
-  if(nrow(x) == nrow(mx))
-    return(cbind(x, mx))
-  
-  #Real work of the method: 
-  else if(nrow(x) < nrow(mx)){
-    x <- padNULL(x, len)
-    return(cbind(x, mx))
+    #No date filter
+    else{
+      
+      
+      days_til <- (as.numeric(Sys.Date()) - reference_date) %% 16
+      next_pass <- (Sys.Date() + days_til) %>% as.character.Date()
+      
+      #Table with all of the data from the map click
+      updating_table <-  cbind("Date" = next_pass, "Path" = paths, 
+                               "Row" = rows, "Lat" = lat, "Long" = lon) %>% as.data.frame()
+      
+      #Fixes a bug that would give manually entered coordinates with no tile 
+      #a place on the output table, throwing a rbind error
+      if(is.null(updating_table$Date))
+        return()
+      
+    }
     
+    #Renders distinct output
+    if(!is.null(global_table)){
+      global_table <<- rbind(updating_table, global_table)
+      x <- duplicated(global_table[,1:3])
+      global_table <<- global_table[!x,]
+    }
     
+    else
+      global_table <<- updating_table
+    
+    #Display table
+    output$table <<- renderDT(
+      global_table, options = list(paging = FALSE, searching = FALSE, info = FALSE) 
+    )
+    
+    #Update the map: clear all tiles, then add only the ones that overlap in Red
+    leafletProxy("map") %>%
+      addTiles(group = "Default") %>%
+      addProviderTiles(providers$Esri.WorldImagery, group = "Satellite") %>%
+      addProviderTiles(providers$CartoDB.VoyagerOnlyLabels, group = "Satellite") %>%
+      setView(lng = lon , lat = lat, zoom = 6) %>%
+      addPolygons(
+        data = tile_shapes, color = 'blue', weight = 1, 
+        highlightOptions = highlightOptions(color = 'black', weight = 3, bringToFront = TRUE), 
+        label = row_number(global_table$Path)) %>%
+      addLayersControl(
+        baseGroups = c("Default", "Satellite"),
+        options = layersControlOptions(collapsed = TRUE))
   }
   
-  else{
-    mx <- padNULL(mx, len)
-    return(cbind(x, mx))
-  }
+  output$download <- downloadHandler(
+    filename = "overpassR.csv",
+    content = function(file){
+      write.csv(global_table, file, row.names = TRUE)
+    }
+  )
+}
+
+
+#Helper methods---------------------------------------------------------------------------------------------------
+
+
+#Helper method takes lon, lat, shapefile, and returns PR of intersected tiles 
+returnPR <- function(lon, lat, shapefile){
+  
+  #Validate input.
+  #PROBLEM: Why is shiny not rendering this output message? 
+  validate(
+    need(validCoords(lon, lat), "Enter valid coordinates")
+  )
+  
+  coords <- as.data.frame(cbind(lon, lat)) 
+  point <- SpatialPoints(coords)
+  proj4string(point) <- CRS("+proj=longlat +ellps=WGS84 +datum=WGS84 +no_defs")
+  
+  #Convert the point to a shape file so they can intersect
+  pnt <-  st_as_sf(point, coords = c('lon' , 'lat'))
+  
+  #Create a boolean matrix of all the polygons that intersect pnt (a user's mapclick)
+  ## And select those polygons from WRS
+  bool_selector <- st_intersects(shapefile, pnt, sparse = FALSE)
+  tiles <- (shapefile[bool_selector,])
+  paths <-  tiles$PATH
+  rows <- tiles$ROW
+  
+  return(data.frame("path" = paths, "row" = rows, "shape" = tiles))
   
 }
 
-#Recursive function that adds NULLs to the end of data frame x until x reaches the desired len
-padNULL <- function(x, len){
+
+validCoords <- function(lon, lat){
   
-  if(is_empty(x))
-    return(data.frame(rep(NA, len)))
+  if(is.null(lon) | is.null(lat)
+     | is.na(lon) | is.na(lat))
+    return(FALSE)
   
-  if(nrow(x) == len)
-    return(x)
+  return(
+    (lat>=-90 && lat<=90) && 
+      (lon>=-180 && lon<=180)
+  )
   
-  else
-    return(padNULL(rbind(x, rep(NA, ncol(x))), len))
-  
-}
+} 
+
+
+
+
+
+
 
 shinyApp(ui, server)
