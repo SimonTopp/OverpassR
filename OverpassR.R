@@ -26,7 +26,7 @@ ui <- fluidPage(
   
   fixedRow(
     column(4, offset = 5,
-           titlePanel("OverpassR")),
+           titlePanel("OverpassR"))
   ),
   
   fixedRow(
@@ -158,7 +158,7 @@ server <- function(input, output, session){
     paths <- df$path
     rows <- df$row
     tile_shapes <- df$shape.geometry
-
+    
     #Shape file of tiles that intersect
     reference_date <- lookup_table[paths,]$Overpass
     
@@ -290,11 +290,6 @@ validCoords <- function(lon, lat){
   )
   
 } 
-
-
-
-
-
 
 
 shinyApp(ui, server)
