@@ -209,6 +209,7 @@ server <- function(input, output, session){
     
     #Find a known start date for the cycle
     CYCLE_1_REFERENCE <- ref$Cycle_Start[1] %>% as.Date() %>% as.numeric()
+<<<<<<< HEAD
     
     #Find 'start date's' cycle 
     start_date_cycle <- (start_date - CYCLE_1_REFERENCE) %% 16 + 1
@@ -269,13 +270,75 @@ server <- function(input, output, session){
         baseGroups = c("Satellite", "Default"),
         options = layersControlOptions(collapsed = TRUE))
   }
+=======
+    
+    #Find 'start date's' cycle 
+start_date_cycle <- (start_date - CYCLE_1_REFERENCE) %% 16 + 1
+
+#Lookup table where every date in rnge has corresponding cycle
+table <- cbind("Date" = range, "Cycle" = getCycles(1, 16, length(range), 
+                                                   start_date_cycle - 1 )) %>% as.data.frame()
+
+updating_table <- NULL
+
+for(r in 1:length(paths)){
+  cycle <- ref[ref$Path==paths[r],]$Cycle
+  dates <- table[table$Cycle==cycle,]$Date %>% as.character()
+>>>>>>> e49e9d303e4c904fe01ecdd9b7d04b1d6a9c0a74
   
-  output$download <- downloadHandler(
-    filename = "overpassR.csv",
-    content = function(file){
-      write.csv(global_table, file, row.names = TRUE)
-    }
-  )
+  if(is_empty(dates))
+    next
+  
+  updating_table <- rbind(updating_table, cbind("Dates" = dates, "Path" = paths[r], "Row" = rows[r], "Lat" = round(lat,5), "Long" = round(lon,5) ))
+}
+
+
+if(is_empty(updating_table)){
+  output$helpText <- renderText("No overpass in selected date range")
+  return(NULL)
+}
+
+else
+  output$helpText <- renderText({})
+
+
+#Renders distinct output
+if(!is_empty(global_table)){
+  global_table <<- rbind(updating_table, global_table) %>% as.data.frame()
+  x <- duplicated(global_table[,1:3])
+  global_table <<- global_table[!x,]
+}
+
+else
+  global_table <<- updating_table %>% as.data.frame()
+
+#Display table
+output$table <<- renderDT(
+  global_table, rownames = NULL, options = list(paging = FALSE, searching = FALSE, info = FALSE) 
+)
+
+#-------------------------------------------------------------------------------------------------------------------------------
+
+#Update the map
+leafletProxy("map") %>%
+  addTiles(group = "Default") %>%
+  addProviderTiles(providers$Esri.WorldImagery, group = "Satellite") %>%
+  addProviderTiles(providers$CartoDB.VoyagerOnlyLabels, group = "Satellite") %>%
+  setView(lng = lon , lat = lat, zoom = 6) %>%
+  addPolygons(
+    data = tile_shapes, color = 'blue', weight = 2, label = toString(c(paths, rows)),
+    highlightOptions = highlightOptions(color = 'white', weight = 3, bringToFront = TRUE)) %>%
+  addLayersControl(
+    baseGroups = c("Satellite", "Default"),
+    options = layersControlOptions(collapsed = TRUE))
+}
+
+output$download <- downloadHandler(
+  filename = "overpassR.csv",
+  content = function(file){
+    write.csv(global_table, file, row.names = TRUE)
+  }
+)
 }
 
 
