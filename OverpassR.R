@@ -263,7 +263,7 @@ server <- function(input, output, session){
       addProviderTiles(providers$CartoDB.VoyagerOnlyLabels, group = "Satellite") %>%
       setView(lng = lon , lat = lat, zoom = 6) %>%
       addPolygons(
-        data = tile_shapes, color = 'blue', weight = 2, label = toString(c(paths, rows)),
+        data = tile_shapes, color = 'blue', weight = 2, label = paste0('Path: ',paths,'; Row: ', rows),
         highlightOptions = highlightOptions(color = 'white', weight = 3, bringToFront = TRUE)) %>%
       addLayersControl(
         baseGroups = c("Satellite", "Default"),
