@@ -16,10 +16,11 @@ wrs <- st_read('data/in/wrs2_asc_desc.shp')
 wrs <- wrs[wrs$MODE == 'D',]
 
 #Lookup table and array of dates
-lookup_table <- read.delim('data/in/lookup_table.txt')
+lookup_table <- read.csv('data/in/landsat8_lookup.csv')
 
-#Global variable output table. It will update with each map click and reset only when 'reset map' button is clicked
+#Global variables. It will update with each map click and reset only when 'reset map' button is clicked
 global_table = data.frame()
+global_coords = data.frame()
 
 
 ui <- fluidPage(
@@ -64,7 +65,9 @@ ui <- fluidPage(
   ),
   
   #Apply Date Button
-  fixedRow( 
+  fixedRow(
+    column(4, offset = 4, 
+           textOutput('helpText')),
     column(1, offset = 8,
            actionButton('applyDates', "Apply Date Filter")
     )
@@ -95,13 +98,14 @@ server <- function(input, output, session){
   #Render map with base layers WorldImagery and Labels
   output$map <- renderLeaflet({
     
-    leaflet() %>%
+    leaflet(options = leafletOptions(minZoom = .75)) %>%
+      setMaxBounds(lng1 = 180, lat1 = 90, lng2 = -180, lat2 = -90)%>%
       addTiles(group = "Default") %>%
       addProviderTiles(providers$Esri.WorldImagery, group = "Satellite") %>%
       addProviderTiles(providers$CartoDB.VoyagerOnlyLabels, group = "Satellite") %>%
       setView(lat=10, lng=0, zoom=2)  %>%
       addLayersControl(
-        baseGroups = c("Default", "Satellite"),
+        baseGroups = c("Satellite", "Default"),
         options = layersControlOptions(collapsed = FALSE)
       )
   })
@@ -111,11 +115,15 @@ server <- function(input, output, session){
     
     lon <- input$lon %>% as.numeric()
     lat <- input$lat %>% as.numeric()
-    validate(
-      need((validCoords(lon, lat)), "Enter valid coordinates")
-    )
     
-    generate(lon, lat)
+    if(!validCoords(lon, lat)){
+      output$helpText <- renderText("Enter valid coordinates")
+      return()
+    }
+    
+    global_coords <<- rbind(global_coords, cbind("Long" = lon, "Lat" = lat)) %>% distinct()
+    
+    generate(lon, lat, lookup_table)
   })
   
   
@@ -124,12 +132,13 @@ server <- function(input, output, session){
     if(is.null(input$map_click))
       return() 
     
-    #clean up
     click <- input$map_click
     lon <- click$lng
     lat <- click$lat
     
-    generate(lon, lat)
+    global_coords <<- rbind(global_coords, cbind("Long" = lon, "Lat" = lat)) %>% distinct()
+    
+    generate(lon, lat, lookup_table)
     
   })
   
@@ -141,110 +150,137 @@ server <- function(input, output, session){
       return()
     
     proxyMap%>% clearShapes()
-    
+    output$helpText <- renderText({})
     updateDateRangeInput(session, "dates", "Date range:",
                          start = Sys.Date(), end = Sys.Date()+16)
     
     output$table <- renderDT(NULL)
-    global_table <<- NULL
+    global_table <<- data.frame()
+    global_coords <<- data.frame()
+    
     
   }
   )
   
-  #Updates map with tiles and global table with data given coordinates of a click
-  generate <- function(lon, lat){
+  #Retroactively update output table with a new date filter
+  observeEvent(input$applyDates,{
     
+    #Check valid dates
+    if(input$dates[1] >= input$dates[2]){
+      output$helpText <- renderText("Please select a positive date range")
+      return()
+    }
+    
+    #Ignore if this is NOT a retroactive click
+    if(is_empty(global_coords))
+      return()
+    
+    #Clear DT and global table to be re-populated
+    output$table <- renderDT(NULL)
+    global_table <<- data.frame()
+    
+    for(row in 1:nrow(global_coords)){
+      generate(global_coords$Long[row], global_coords$Lat[row], lookup_table)
+    }
+    
+  })
+  
+  
+  #Updates map with tiles and global table with data given coordinates of a click
+  generate <- function(lon, lat, ref){
+    
+    ##Here, WRS variable can be replaced with the list of checked boxes
     df <- returnPR(lon, lat, wrs)
     paths <- df$path
     rows <- df$row
     tile_shapes <- df$shape.geometry
     
-    #Shape file of tiles that intersect
-    reference_date <- lookup_table[paths,]$Overpass
+    start_date <- input$dates[1] %>% as.numeric()
+    end_date <- input$dates[2] %>% as.numeric()
     
-    #Handles if date filter is applied  
-    if(input$applyDates){
-      
-      
-      validate(
-        need( (as.numeric(input$dates[2] - input$dates[1]) >=16), message =  "Please enter valid date range") 
-      )
-      
-      start_date <- input$dates[1]
-      end_date <- input$dates[2]
-      
-      days_til <- (as.numeric(start_date - reference_date)) %% 16
-      next_pass <- (start_date + days_til) %>% as.Date()
-      
-      len <- 1:length(next_pass)
-      updating_table <- NULL
-      
-      #Each loop iteration creates a data frame "temp" of dates, path, row, lat, lon for one tile
-      ## Subseqeuent iterations create a temp data frame, then append the new data frame to the previous one
-      for (r in len){
-        dates <- seq.Date(next_pass[r], to = end_date, by = 16) %>% as.character()
-        temp <- cbind("Date" = dates, "Path" = paths, "Row" = rows, "Lat" = lat, "Long" = lon)
-        updating_table <- rbind(updating_table, temp)
-      }
-      
-      
+    #Be sure user selects a positive date range
+    if(start_date >= end_date){
+      output$helpText <- renderText("Please select a positive date range")
+      return(NULL)
     }
     
-    #No date filter
-    else{
-      
-      
-      days_til <- (as.numeric(Sys.Date()) - reference_date) %% 16
-      next_pass <- (Sys.Date() + days_til) %>% as.character.Date()
-      
-      #Table with all of the data from the map click
-      updating_table <-  cbind("Date" = next_pass, "Path" = paths, 
-                               "Row" = rows, "Lat" = lat, "Long" = lon) %>% as.data.frame()
-      
-      #Fixes a bug that would give manually entered coordinates with no tile 
-      #a place on the output table, throwing a rbind error
-      if(is.null(updating_table$Date))
-        return()
-      
-    }
+    #Create range of dates from start - end
+    range <- start_date:end_date %>% as.Date('1970-01-01') %>% as.character()
     
-    #Renders distinct output
-    if(!is.null(global_table)){
-      global_table <<- rbind(updating_table, global_table)
-      x <- duplicated(global_table[,1:3])
-      global_table <<- global_table[!x,]
-    }
+    #Find a known start date for the cycle
+    CYCLE_1_REFERENCE <- ref$Cycle_Start[1] %>% as.Date() %>% as.numeric()
     
-    else
-      global_table <<- updating_table
-    
-    #Display table
-    output$table <<- renderDT(
-      global_table, options = list(paging = FALSE, searching = FALSE, info = FALSE) 
-    )
-    
-    #Update the map: clear all tiles, then add only the ones that overlap in Red
-    leafletProxy("map") %>%
-      addTiles(group = "Default") %>%
-      addProviderTiles(providers$Esri.WorldImagery, group = "Satellite") %>%
-      addProviderTiles(providers$CartoDB.VoyagerOnlyLabels, group = "Satellite") %>%
-      setView(lng = lon , lat = lat, zoom = 6) %>%
-      addPolygons(
-        data = tile_shapes, color = 'blue', weight = 1, 
-        highlightOptions = highlightOptions(color = 'black', weight = 3, bringToFront = TRUE), 
-        label = row_number(global_table$Path)) %>%
-      addLayersControl(
-        baseGroups = c("Default", "Satellite"),
-        options = layersControlOptions(collapsed = TRUE))
-  }
+    #Find 'start date's' cycle 
+start_date_cycle <- (start_date - CYCLE_1_REFERENCE) %% 16 + 1
+
+#Lookup table where every date in rnge has corresponding cycle
+table <- cbind("Date" = range, "Cycle" = getCycles(1, 16, length(range), 
+                                                   start_date_cycle - 1 )) %>% as.data.frame()
+
+updating_table <- NULL
+
+for(r in 1:length(paths)){
+  cycle <- ref[ref$Path==paths[r],]$Cycle
+  dates <- table[table$Cycle==cycle,]$Date %>% as.character()
   
-  output$download <- downloadHandler(
-    filename = "overpassR.csv",
-    content = function(file){
-      write.csv(global_table, file, row.names = TRUE)
-    }
-  )
+  if(is_empty(dates))
+    next
+  
+  updating_table <- rbind(updating_table, cbind("Dates" = dates, "Path" = paths[r], "Row" = rows[r], "Lat" = round(lat,5), "Long" = round(lon,5) ))
 }
+
+
+if(is_empty(updating_table)){
+  output$helpText <- renderText("No overpass in selected date range")
+  return(NULL)
+}
+
+else
+  output$helpText <- renderText({})
+
+
+#Renders distinct output
+if(!is_empty(global_table)){
+  global_table <<- rbind(updating_table, global_table) %>% as.data.frame()
+  x <- duplicated(global_table[,1:3])
+  global_table <<- global_table[!x,]
+}
+
+else
+  global_table <<- updating_table %>% as.data.frame()
+
+#Display table
+output$table <<- renderDT(
+  global_table, rownames = NULL, options = list(paging = FALSE, searching = FALSE, info = FALSE) 
+)
+
+#-------------------------------------------------------------------------------------------------------------------------------
+
+#Update the map
+leafletProxy("map") %>%
+  addTiles(group = "Default") %>%
+  addProviderTiles(providers$Esri.WorldImagery, group = "Satellite") %>%
+  addProviderTiles(providers$CartoDB.VoyagerOnlyLabels, group = "Satellite") %>%
+  setView(lng = lon , lat = lat, zoom = 6) %>%
+  addPolygons(
+    data = tile_shapes, color = 'blue', weight = 2, label = toString(c(paths, rows)),
+    highlightOptions = highlightOptions(color = 'white', weight = 3, bringToFront = TRUE)) %>%
+  addLayersControl(
+    baseGroups = c("Satellite", "Default"),
+    options = layersControlOptions(collapsed = TRUE))
+}
+
+output$download <- downloadHandler(
+  filename = "overpassR.csv",
+  content = function(file){
+    write.csv(global_table, file, row.names = TRUE)
+  }
+)
+}
+
+
+
+
 
 
 #Helper methods---------------------------------------------------------------------------------------------------
@@ -277,7 +313,6 @@ returnPR <- function(lon, lat, shapefile){
   
 }
 
-
 validCoords <- function(lon, lat){
   
   if(is.null(lon) | is.null(lat)
@@ -290,6 +325,14 @@ validCoords <- function(lon, lat){
   )
   
 } 
+
+
+
+getCycles <- function(from, to, len, offset = 0){
+  cycles <- rep(1:16, length.out = (len+offset))
+  return(cycles[(1+offset):length(cycles)])
+}
+
 
 
 shinyApp(ui, server)
