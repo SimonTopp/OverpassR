@@ -27,7 +27,7 @@ choices <- c("ls7","ls8","s2")
 #Acquisition swath and mgrs tiles for Sentinel2
 MGRS <- st_read('Data/In/Sentinel/Relevant_MGRS.shp')
 SWATHS <- st_read('Data/In/Sentinel/Sentinel-2A_MP_ACQ_KML_20200716T120000_20200803T150000.kml', layer = "NOMINAL")
-SWATHS$Overpass <- as.Date(SWATHS$begin, format = "%y/%m/%d")
+SWATHS$Overpass <- ymd_hms(SWATHS$begin)
 
 #Global variables. It will update with each map click and reset only when 'reset map' button is clicked
 global_table = data.frame()
@@ -335,7 +335,10 @@ server <- function(input, output, session){
       return(NULL)
     }
     
-    within_range <- c(start + ((swaths$Overpass %>% as.Date() %>% as.numeric()  - start) %% 5) %>% unique())
+    start <- ymd_hms('2020-09-18-00-00-00')
+    swaths = SWATHS %>% sample_n(1)
+    #within_range <- c(start + ((swaths$Overpass %>% as.Date() %>% as.numeric()  - start) %% 5) %>% unique())
+    within_range <- c(start + ((swaths$Overpass - start) %>% as.numeric()  %% 5) %>% unique())
     
     #Positive date range, but too narrow
     if(any(within_range>stop)){
